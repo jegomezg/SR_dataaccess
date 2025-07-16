@@ -12,7 +12,9 @@ from typing import List, Dict, Tuple
 import matplotlib.pyplot as plt
 
 
-def load_xarray_from_url(image_url: str) -> xr.DataArray:
+# In your utils.py file
+
+def load_xarray_from_url(image_url: str, masked: bool = True) -> xr.DataArray:
     gdal_config = {
         "GDAL_HTTP_COOKIEFILE": "~/cookies.txt",
         "GDAL_HTTP_COOKIEJAR": "~/cookies.txt",
@@ -20,20 +22,17 @@ def load_xarray_from_url(image_url: str) -> xr.DataArray:
         "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": "TIF",
         "GDAL_HTTP_UNSAFESSL": "YES",
     }
-
-    chunk_size = dict(
-        band=1, x=512, y=512
-    )  # Tiles have 1 band and are divided into 512x512 pixel chunks
+    chunk_size = dict(band=1, x=512, y=512)
     max_retries = 50
 
     for _i in range(max_retries):
         try:
             with rasterio.Env(**gdal_config):
+                # Use the 'masked' parameter here
                 image_xarray = rxr.open_rasterio(
                     image_url, chunks=chunk_size, masked=True
                 ).squeeze("band", drop=True)
-                print(image_xarray.dtype)
-                break  # Exit the retry loop if successful
+                break
         except Exception as ex:
             print(f"vsi curl error: {ex}. Retrying...")
 
@@ -82,19 +81,57 @@ def match_flag_bit(requ_flag):
             return 5
 
 
-def get_bitmast_from_fmask(fmask, req_flag="cloud"):
-    bit = match_flag_bit(req_flag)
-    try:
-        mask = extract_bits(fmask, bit) << bit
-    except TypeError:
-        data = fmask.data
-        if data.dtype.kind not in 'iu':  # i is for integer, u for unsigned integer
-            data = data.astype(int)  # Cast to int to ensure bitwise operations work
-
-        mask = extract_bits(data, bit) << bit
-    return xr.where(mask > 0, 1, 0)
-
-
+def get_bitmask_from_fmask(fmask, req_flag="cloud"):
+    """
+    Extract a specific flag from HLS Fmask data.
+    
+    Parameters:
+    -----------
+    fmask : xarray.DataArray
+        Fmask data (scaled by 10000)
+    req_flag : str
+        Flag to extract: "cloud", "adjacent", "shadow", "snow", "water"
+    
+    Returns:
+    --------
+    xarray.DataArray with 1 where flag is set, 0 where clear, NaN where no data
+    """
+    bit_positions = {
+        "cirrus": 0,
+        "cloud": 1,
+        "adjacent": 2,
+        "shadow": 3,
+        "snow": 4,
+        "water": 5
+    }
+    
+    if req_flag not in bit_positions:
+        raise ValueError(f"Unknown flag: {req_flag}")
+    
+    bit = bit_positions[req_flag]
+    
+    # Convert to numpy array and handle scaling
+    values = fmask.values
+    valid_mask = ~np.isnan(values)
+    
+    # Initialize result with NaN
+    result = np.full_like(values, np.nan)
+    
+    if valid_mask.any():
+        # Convert to integer (data is scaled by 10000)
+        fmask_int = np.round(values[valid_mask] * 10000).astype(np.uint8)
+        
+        # Extract bit
+        bit_values = (fmask_int >> bit) & 1
+        
+        # Place results
+        result[valid_mask] = bit_values
+    
+    return xr.DataArray(
+        result,
+        coords=fmask.coords,
+        dims=fmask.dims
+    )
 ##############################################################
 # TODO: maybe move this
 
